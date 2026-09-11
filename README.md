@@ -138,9 +138,21 @@ by Django's autoreloader. If something gets wedged, `scripts/dev.sh restart`.
 ## Troubleshooting
 
 **The page loads but messages never appear in the other tab.**
-The SSE stream isn't getting through. Check `scripts/dev.sh status` shows ports
-7677 and 5561 listening — those are Pushpin. If they're closed, look for Pushpin
-errors in `.dev/logs/edge.log`.
+The SSE stream isn't getting through. First find out *where* it's broken, by
+testing inside the container where no port forwarding is involved — that's
+[exercise 0](WORKSHOP.md#0-watch-the-realtime-path-without-a-browser):
+
+```sh
+curl -N http://127.0.0.1:7676/rooms/default/events/   # in one terminal
+curl -X POST http://127.0.0.1:7676/rooms/default/messages/ \
+  -d 'from=t' -d 'text=hi'                            # in another
+```
+
+If the event arrives in the `curl` but not in the browser, the app is fine and
+the issue is the forwarded-port proxy — try the browser preview, or make the
+port public (see [above](#chat-with-the-person-next-to-you)). If it doesn't
+arrive in `curl` either, check `scripts/dev.sh status` shows ports 7677 and 5561
+listening — those are Pushpin — and look for errors in `.dev/logs/edge.log`.
 
 **`failed to find 'pushpin' in your $PATH`.**
 The Pushpin install didn't happen. Verify with `command -v pushpin`. Rebuild the
