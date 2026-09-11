@@ -42,10 +42,15 @@ RUN apt-get update \
 # Fastly CLI shells out to this binary so that createFanoutHandoff() works on
 # a local machine, with no Fastly account required.
 #
-# The newest published package sometimes targets a different Ubuntu release
-# than the one we're on (its dependencies won't resolve), so if the default
-# candidate can't be installed we walk back through older versions until one
-# does. This keeps the image building even as upstream publishes new packages.
+# The version fallback below is load-bearing, not just belt-and-braces: as of
+# this writing a plain `apt-get install pushpin` on jammy FAILS. The newest
+# published package, 1.42.0-1~jammy1, declares noble-style dependency names
+# (libqt6core6t64, libqt6network6t64) which don't exist on jammy; 1.41.0-2~jammy1
+# declares jammy's real libqt6core6/libqt6network6 and installs fine.
+#
+# So if the default candidate can't be installed, walk back through older
+# versions until one resolves. This also keeps the image building as upstream
+# publishes new packages.
 RUN install -d -m 0755 /etc/apt/keyrings \
     && curl -fsSL https://pushpin.org/pushpin-package.asc \
         | gpg --dearmor -o /etc/apt/keyrings/pushpin.gpg \
