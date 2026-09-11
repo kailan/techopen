@@ -169,6 +169,20 @@ The publish request failed. The response body says why, and the dev server's
 terminal has the same message. Locally this usually means Pushpin isn't up —
 check that port 5561 is listening.
 
+**A change to `src/` made everything return 500.**
+Your code threw, and the terminal only says `Error while running request handler.`
+with no stack trace. Wrap the suspect code in `try`/`catch` and
+`console.error(error.message)` — see the top of [WORKSHOP.md](WORKSHOP.md) for the
+snippet. To see what your code returned before Fanout touched it, send the request
+yourself with a `Grip-Sig` header:
+
+```sh
+curl -si -H 'Grip-Sig: fake' http://127.0.0.1:7676/rooms/default/events/
+```
+
+**A change to `fastly.toml` seems to do nothing.**
+Only `src/` is watched. Ctrl+C the dev server and run `npm run dev` again.
+
 **Setup half-finished / dependencies missing.**
 Re-run it; it's idempotent:
 
@@ -178,18 +192,23 @@ bash .devcontainer/setup.sh
 
 ## Running without Codespaces
 
-The devcontainer also works in VS Code locally via *Dev Containers: Reopen in
-Container* — **but only on x86_64**. Pushpin's apt repository publishes amd64
-packages only, so on an Apple Silicon Mac the image build stops with an
-explanatory error. You can either add `"runArgs": ["--platform=linux/amd64"]` to
-`.devcontainer/devcontainer.json` and accept the emulation slowdown, or skip the
-container entirely:
+On macOS, skipping the container is the easiest route — Homebrew has a native
+Pushpin build, including on Apple Silicon:
 
 ```sh
-brew install pushpin        # macOS; see https://pushpin.org/docs/install/
+brew install pushpin        # see https://pushpin.org/docs/install/
 npm install                 # needs node 20+
 npm run dev
 ```
+
+That's the setup this repo was developed and tested against, on an arm64 Mac.
+
+The devcontainer also works in VS Code locally via *Dev Containers: Reopen in
+Container* — **but only on x86_64**. Pushpin's apt repository publishes amd64
+packages only, so on an Apple Silicon Mac the image build stops with an
+explanatory error. Add `"runArgs": ["--platform=linux/amd64"]` to
+`.devcontainer/devcontainer.json` if you want it anyway, and accept the emulation
+slowdown.
 
 ## Deploying to real Fastly
 

@@ -4,5 +4,8 @@ node_modules/
 bin/
 pkg/
 
+# Pushpin's logs, written into the working directory by the dev server
+pushpin-logs/
+
 # Editors / OS
 .DS_Store

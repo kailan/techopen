@@ -6,15 +6,37 @@ something else.
 Assumed running: the dev server is up and port 7676 works in your browser. If
 not, see [README.md](README.md#troubleshooting).
 
-The loop: **edit anything in `src/` → save → it rebuilds and reloads.** Watch the
-terminal for the rebuild; a syntax error shows up there and the old Wasm keeps
-serving until you fix it.
+The loop: **edit anything in `src/` → save → it rebuilds and reloads** (about
+three seconds). Watch the terminal for the rebuild; a syntax error shows up there
+and the old Wasm keeps serving until you fix it.
 
 Three files, all at the root:
 
 - `src/index.js` — routing
 - `src/fanout.js` — the GRIP response and the publish call
 - `src/page.html` — the frontend
+
+Two things that will otherwise cost you ten minutes each:
+
+- **Only `src/` is watched.** If you edit `fastly.toml` — which exercise 6 asks
+  you to — Ctrl+C the dev server and start it again with `npm run dev`. Nothing
+  will tell you that you needed to.
+- **A crash is reported as a bare 500.** If your code throws, the response is a
+  500 and the terminal says only `Error while running request handler.` — no
+  message, no stack trace, no line number. When that happens, wrap the suspect
+  code and print the error yourself:
+
+  ```js
+  try {
+    // ...your change...
+  } catch (error) {
+    console.error(`BOOM: ${error.name}: ${error.message}`);
+    throw error;
+  }
+  ```
+
+  `console.error` goes to the terminal. This is the single most useful debugging
+  trick here, so it's worth doing before you get stuck rather than after.
 
 ---
 
@@ -44,9 +66,17 @@ data: {"from":"terminal","text":"hello from curl"}
 ```
 
 Leave terminal A running and look at the dev server's log. You'll see **two**
-requests for one `curl`: the original, and Fanout's request back to the `self`
-backend carrying `Grip-Sig`. Both finished in milliseconds. Nothing in your code
-is holding terminal A's connection — Pushpin is.
+requests for one `curl`, and the log nests the second inside the first:
+
+```
+request{id=0}: handling request GET .../rooms/default/events/
+request{id=0}: Pushpin redirect signaled to backend 'self'
+request{id=0}:request{id=1}: handling request GET .../rooms/default/events/
+```
+
+`id=0` is the browser's request; `id=1` is Fanout coming back to ask what to do,
+carrying `Grip-Sig`. Both completed in about a millisecond. Nothing in your code
+is holding terminal A's connection open — Pushpin is.
 
 Wait 20 seconds and terminal A gets a blank line. That's `Grip-Keep-Alive`
 (see `src/fanout.js`), and it's why the stream survives idle proxies.
@@ -75,10 +105,29 @@ curl -sI http://127.0.0.1:7676/ | grep -i x-workshop
 ```
 
 **Then try:** add a header to the *streaming* response instead — the one
-`gripResponse()` builds — and see whether it reaches the client. Fanout consumes
-the `Grip-*` headers and replaces them with its own response to the client, so
-what you get on the wire is not quite what you returned. Worth knowing before you
-debug something confusing later.
+`gripResponse()` builds in `src/fanout.js` — and compare what you returned with
+what the client gets:
+
+```sh
+# what the client sees, through Fanout.
+# -D - dumps the headers, -o /dev/null throws the (endless) body away.
+curl -sD - -o /dev/null --max-time 3 http://127.0.0.1:7676/rooms/default/events/
+
+# what you actually returned: pretend to be Fanout, and you get it raw
+curl -sD - -o /dev/null -H 'Grip-Sig: fake' http://127.0.0.1:7676/rooms/default/events/
+```
+
+(`curl -I` won't work on these — that sends `HEAD`, and the stream route only
+answers `GET`.)
+
+Your own header survives both ways. But the second command shows
+`grip-hold`, `grip-channel`, `grip-keep-alive` and `content-length: 0`, and the
+first shows none of them — instead you get `transfer-encoding: chunked`. Fanout
+ate the instructions, acted on them, and wrote its own response.
+
+That second command is the most useful debugging tool in this repo: setting
+`Grip-Sig` yourself takes Fanout out of the picture and shows you exactly what
+your code produced.
 
 ---
 
@@ -100,8 +149,13 @@ Reload the chat. Watch the status dot in the header, and the dev server log.
 
 **What to look for:** the browser now receives the `Grip-Hold` and `Grip-Channel`
 headers *itself* — and does nothing with them, because it is not a GRIP proxy. The
-response has an empty body, so it ends immediately, so `EventSource` reconnects,
-forever. You get a hot loop of requests and no messages.
+response has an empty body, so it ends immediately (in about 1.5ms), so
+`EventSource` reconnects, forever. You get a hot loop of requests and no messages.
+
+```sh
+curl -s -o /dev/null -w '%{http_code} in %{time_total}s\n' \
+  http://127.0.0.1:7676/rooms/default/events/     # 200 in 0.0015s — not held
+```
 
 The lesson: those headers aren't a feature of HTTP. They're instructions, and they
 only mean anything because there's something in the path that speaks GRIP. That
@@ -115,7 +169,24 @@ return createFanoutHandoff(request, 'self');
 ```
 
 Fanout hands the request to `self`, which hands it to Fanout, which hands it to
-`self`… find out what that looks like in the log, then put both branches back.
+`self`… and nothing stops it. **One** request measured here produced 3,868 nested
+handoffs, 798 levels deep, in ten seconds, with no loop detection anywhere in the
+stack — the log shows an ever-growing
+`request{id=0}:request{id=2}:request{id=4}:…` chain.
+
+So: send exactly one request, with a timeout, and stop it yourself.
+
+```sh
+curl -s -o /dev/null --max-time 5 http://127.0.0.1:7676/rooms/default/events/
+```
+
+Put the `Grip-Sig` check back afterwards. The dev server recovers on its own once
+the request is abandoned — no restart needed — but a browser tab left open on this
+will keep the loop going indefinitely.
+
+**The real lesson:** the `Grip-Sig` check isn't a nicety, it's what terminates the
+recursion. A self-referential backend is a loop with a base case, and that header
+is the base case.
 
 ---
 
@@ -157,12 +228,11 @@ here runs in every POP, not in one datacentre.
 
 **Goal:** learn the shape of GRIP beyond the happy path.
 
-A held connection can be subscribed to several channels: repeat the
-`Grip-Channel` header. Give every connection an `announcements` channel alongside
-its room.
+A held connection can be subscribed to several channels. Give every connection an
+`announcements` channel alongside its room.
 
-The catch: a plain object can't have two keys of the same name, so
-`gripResponse()` has to build `Headers` and `append`:
+A plain object can't have two keys of the same name, so use `Headers` and
+`append`:
 
 ```js
 export function gripResponse(channel) {
@@ -177,9 +247,28 @@ export function gripResponse(channel) {
 }
 ```
 
-**Verify:** open two tabs in *different* rooms (`/?room=a` and `/?room=b`), then
-publish to `announcements` using the recipe in exercise 5 below. Both tabs should
-show it; a message sent in room `a` should still only appear in room `a`.
+Look at what that actually sends, with the `Grip-Sig` trick from exercise 1:
+
+```sh
+curl -sD - -o /dev/null -H 'Grip-Sig: fake' \
+  http://127.0.0.1:7676/rooms/aaa/events/ | grep -i channel
+# grip-channel: room-aaa, announcements
+```
+
+Two `append` calls, one header, comma-joined — and GRIP reads that as two
+channels. (Which means `'Grip-Channel': \`${channel}, announcements\`` on a plain
+object would have worked too. `Headers` is the tidier habit.)
+
+**Verify:** subscribe to two different rooms, then publish to `announcements`
+using the recipe in exercise 5 below, changing the channel to `announcements`:
+
+```sh
+curl -N http://127.0.0.1:7676/rooms/aaa/events/   # terminal A
+curl -N http://127.0.0.1:7676/rooms/bbb/events/   # terminal B
+```
+
+Both terminals should get the announcement; a message sent to room `aaa` should
+still appear only in terminal A.
 
 **Extensions:** a per-user channel (`user-<nickname>`) for direct messages;
 `Grip-Channel: name; prev-id=<id>` to make the stream detect gaps.
@@ -242,7 +331,9 @@ in `fastly.toml`:
 history = []
 ```
 
-**2.** Append to it when publishing, in `src/index.js`:
+`fastly.toml` isn't watched, so restart the dev server (Ctrl+C, `npm run dev`).
+
+**2.** Append to it when publishing, in the POST branch of `src/index.js`:
 
 ```js
 import { KVStore } from 'fastly:kv-store';
@@ -255,7 +346,8 @@ messages.push(message);
 await history.put(key, JSON.stringify(messages.slice(-20)));
 ```
 
-**3.** Send it as the body of the GRIP response, in `src/fanout.js`:
+**3.** Let `gripResponse()` take a backlog and emit it as the body, in
+`src/fanout.js`:
 
 ```js
 export function gripResponse(channel, backlog = []) {
@@ -266,8 +358,23 @@ export function gripResponse(channel, backlog = []) {
 }
 ```
 
-**Verify:** send a few messages, then open a fresh tab. It should arrive
-pre-populated, and keep receiving new messages.
+**4.** Read the history back and pass it, in the `Grip-Sig` branch of
+`src/index.js` — this is the step that's easy to forget:
+
+```js
+const stored = await new KVStore('history').get(`room-${room}`);
+return gripResponse(`room-${room}`, stored ? await stored.json() : []);
+```
+
+**Verify:** send a few messages with nobody listening, then open a fresh
+subscriber. It gets the backlog immediately, then live messages after it:
+
+```sh
+for t in one two three; do
+  curl -s -X POST http://127.0.0.1:7676/rooms/hist/messages/ -d 'from=a' -d "text=$t"
+done
+curl -N http://127.0.0.1:7676/rooms/hist/events/   # all three arrive at once
+```
 
 **Things that will bite you, and are worth discussing:**
 
@@ -280,6 +387,10 @@ pre-populated, and keep receiving new messages.
   survivable: the live path is Fanout, and KV is only the catch-up path.
 - Locally, Viceroy keeps the store in memory and **loses it when the dev server
   restarts** — including on every rebuild. Don't debug that for ten minutes.
+- `const messages = ...` in step 2 shadows nothing now, but if you name a new
+  variable after one that already exists in the same block, you get a bare 500 and
+  `Cannot access 'x' before initialization` — which the terminal won't tell you.
+  See the `console.error` trick at the top of this file.
 
 ---
 

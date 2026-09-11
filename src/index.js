@@ -25,8 +25,12 @@ async function handleRequest(event) {
 
   // --- the page -------------------------------------------------------------
 
-  if (request.method === 'GET' && (path === '/' || path === '/index.html')) {
-    return new Response(PAGE, {
+  // HEAD as well as GET, so that `curl -I` reports headers instead of a
+  // confusing 404 — it's the first thing anyone reaches for to inspect them.
+  const isRead = request.method === 'GET' || request.method === 'HEAD';
+
+  if (isRead && (path === '/' || path === '/index.html')) {
+    return new Response(request.method === 'HEAD' ? null : PAGE, {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     });
   }
@@ -44,9 +48,9 @@ async function handleRequest(event) {
   // Step 2 is the interesting one: after it, this app is not involved in the
   // connection at all, however long it lives.
 
-  const events = EVENTS_PATH.exec(path);
-  if (events && request.method === 'GET') {
-    const room = events[1];
+  const eventsMatch = EVENTS_PATH.exec(path);
+  if (eventsMatch && request.method === 'GET') {
+    const room = eventsMatch[1];
     if (!ROOM_NAME.test(room)) {
       return badRequest('Invalid room name');
     }
@@ -67,9 +71,9 @@ async function handleRequest(event) {
   // to the channel, reaches whoever is connected right now, and is gone. Adding
   // history is exercise 6 in WORKSHOP.md.
 
-  const messages = MESSAGES_PATH.exec(path);
-  if (messages && request.method === 'POST') {
-    const room = messages[1];
+  const messagesMatch = MESSAGES_PATH.exec(path);
+  if (messagesMatch && request.method === 'POST') {
+    const room = messagesMatch[1];
     if (!ROOM_NAME.test(room)) {
       return badRequest('Invalid room name');
     }
