@@ -1,0 +1,18 @@
+# Local dev server state (pids and logs from scripts/dev.sh)
+.dev/
+
+# Origin (Django)
+origin/.env
+origin/venv/
+origin/db.sqlite3
+origin/staticfiles/
+__pycache__/
+*.py[cod]
+
+# Edge (Fastly Compute)
+edge/node_modules/
+edge/bin/
+edge/pkg/
+
+# Editors / OS
+.DS_Store

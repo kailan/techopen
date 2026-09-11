@@ -1,0 +1,20 @@
+{
+  "name": "fanout-chat-workshop-edge",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@fastly/cli": "^16.0.0",
+    "@fastly/js-compute": "^3.45.1"
+  },
+  "scripts": {
+    "dev": "fastly compute serve --watch --watch-dir=src",
+    "serve": "fastly compute serve",
+    "build": "js-compute-runtime ./src/index.js ./bin/main.wasm",
+    "deploy": "fastly compute publish"
+  }
+}
