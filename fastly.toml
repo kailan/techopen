@@ -1,0 +1,61 @@
+# This file describes a Fastly Compute package. To learn more visit:
+# https://www.fastly.com/documentation/reference/compute/fastly-toml/
+
+authors = ["oss@fastly.com"]
+description = "A realtime chat app served entirely from Fastly Compute, using Fanout"
+language = "javascript"
+manifest_version = 3
+name = "fanout-chat-workshop"
+
+[scripts]
+build = "npm run build"
+
+# Run Pushpin alongside the local dev server, so that createFanoutHandoff()
+# actually works on this machine. Pushpin is the open-source GRIP proxy that
+# Fanout is built on, so it stands in for Fanout locally — which is what makes
+# this workshop possible without a Fastly account.
+#
+# Requires the Fastly CLI >= 13.1.0 and a `pushpin` binary on $PATH; the
+# devcontainer installs one for you.
+[local_server.pushpin]
+enable = true
+
+# --- backends ---------------------------------------------------------------
+#
+# `self` is this service, as seen by Fanout.
+#
+# When we call createFanoutHandoff(request, 'self'), Fanout needs somewhere to
+# forward the request to in order to find out what to do with it — and here that
+# somewhere is *us*. So the app gets a second look at the same request, this time
+# with a Grip-Sig header, and answers with GRIP instructions instead of a body.
+#
+# Locally the dev server listens on 7676, so `self` points straight back at it.
+[local_server.backends.self]
+url = "http://127.0.0.1:7676/"
+override_host = "127.0.0.1:7676"
+
+# `publisher` is where messages get pushed to.
+#
+# Locally that's Pushpin's publish handler, started by [local_server.pushpin]
+# above. Deployed, it's api.fastly.com (see [setup.backends.publisher]) — same
+# protocol, same app code, different host.
+[local_server.backends.publisher]
+url = "http://127.0.0.1:5561/"
+override_host = "127.0.0.1:5561"
+
+# --- service setup ----------------------------------------------------------
+#
+# Only used by `fastly compute publish` when creating a real Fastly service.
+# Everything above this point is local-only.
+
+[setup.backends.self]
+description = "This service itself, so Fanout can hand requests back to us. Use this service's own domain (e.g. my-app.edgecompute.app), port 443, and set Override Host to the same value."
+port = 443
+
+[setup.backends.publisher]
+description = "The Fastly API, used to publish messages to Fanout channels."
+address = "api.fastly.com"
+port = 443
+
+[setup.products.fanout]
+enable = true

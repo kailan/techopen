@@ -3,12 +3,18 @@
 Roughly ordered by difficulty. Do them in any order — or ignore them and build
 something else.
 
-Assumed running: `scripts/dev.sh` has started both apps, and port 7676 works in
-your browser. If not, see [README.md](README.md#troubleshooting).
+Assumed running: the dev server is up and port 7676 works in your browser. If
+not, see [README.md](README.md#troubleshooting).
 
-Reminder of the loop: **edit `edge/src/index.js` → save → it rebuilds itself.**
-Watch `.dev/logs/edge.log` (or the terminal) for the rebuild. Python changes are
-picked up by Django's autoreloader.
+The loop: **edit anything in `src/` → save → it rebuilds and reloads.** Watch the
+terminal for the rebuild; a syntax error shows up there and the old Wasm keeps
+serving until you fix it.
+
+Three files, all at the root:
+
+- `src/index.js` — routing
+- `src/fanout.js` — the GRIP response and the publish call
+- `src/page.html` — the frontend
 
 ---
 
@@ -16,8 +22,8 @@ picked up by Django's autoreloader.
 
 Before changing anything, see the mechanism directly. You'll need two terminals.
 
-**Terminal A** — subscribe to a room's event stream. This is the request that
-gets handed off to Fanout, and it will just sit there holding open:
+**Terminal A** — subscribe to a room. This is the request that gets handed off to
+Fanout, and it will just sit there holding open:
 
 ```sh
 curl -N http://127.0.0.1:7676/rooms/default/events/
@@ -30,11 +36,20 @@ curl -X POST http://127.0.0.1:7676/rooms/default/messages/ \
   -d 'from=terminal' -d 'text=hello from curl'
 ```
 
-Terminal A should print an SSE event within a moment. Keep this output — the
-exact framing is useful in exercise 5.
+Terminal A should print an SSE event within a moment:
 
-**Worth noticing:** terminal A's connection is held by Pushpin (Fanout), *not* by
-Django. Django answered that request in milliseconds and moved on.
+```
+event: message
+data: {"from":"terminal","text":"hello from curl"}
+```
+
+Leave terminal A running and look at the dev server's log. You'll see **two**
+requests for one `curl`: the original, and Fanout's request back to the `self`
+backend carrying `Grip-Sig`. Both finished in milliseconds. Nothing in your code
+is holding terminal A's connection — Pushpin is.
+
+Wait 20 seconds and terminal A gets a blank line. That's `Grip-Keep-Alive`
+(see `src/fanout.js`), and it's why the stream survives idle proxies.
 
 ---
 
@@ -42,12 +57,15 @@ Django. Django answered that request in milliseconds and moved on.
 
 **Goal:** get comfortable with the edit/rebuild cycle.
 
-Add a header to every response in `edge/src/index.js`:
+Add a header to the page response in `src/index.js`:
 
 ```js
-const response = await fetch(request, { backend: 'origin' });
-response.headers.set('x-workshop', 'edge was here');
-return response;
+return new Response(PAGE, {
+  headers: {
+    'Content-Type': 'text/html; charset=utf-8',
+    'x-workshop': 'edge was here',
+  },
+});
 ```
 
 **Verify:**
@@ -56,113 +74,125 @@ return response;
 curl -sI http://127.0.0.1:7676/ | grep -i x-workshop
 ```
 
-If you don't see it, check the rebuild finished — a syntax error will show up in
-`.dev/logs/edge.log` and the old Wasm keeps serving.
+**Then try:** add a header to the *streaming* response instead — the one
+`gripResponse()` builds — and see whether it reaches the client. Fanout consumes
+the `Grip-*` headers and replaces them with its own response to the client, so
+what you get on the wire is not quite what you returned. Worth knowing before you
+debug something confusing later.
 
 ---
 
-## 2. Serve a route entirely at the edge
-
-**Goal:** respond without touching the origin at all.
-
-Add a handler that returns a synthetic response before any `fetch()`:
-
-```js
-if (pathname === '/edge-info') {
-  return new Response(
-    JSON.stringify({
-      method: request.method,
-      path: pathname,
-      // Try event.client here too — see what's available locally vs deployed.
-    }, null, 2),
-    { headers: { 'Content-Type': 'application/json' } },
-  );
-}
-```
-
-**Verify:** `curl -s http://127.0.0.1:7676/edge-info`
-
-Stop the origin (`scripts/dev.sh stop` then start only what you need, or just
-kill Django) and confirm `/edge-info` still answers while `/` doesn't. That's
-work the origin never sees.
-
----
-
-## 3. Break the handoff on purpose
+## 2. Break the handoff on purpose
 
 **Goal:** understand what `createFanoutHandoff()` actually buys you.
 
-Comment out the Fanout branch so the events request is proxied like any other
-request:
+In `src/index.js`, make the events route skip the handoff and always return the
+GRIP response:
 
 ```js
-// if (request.method === 'GET' && pathname.startsWith('/rooms/') && pathname.endsWith('/events/')) {
-//   return createFanoutHandoff(request, 'origin');
-// }
-```
-
-Reload the chat in two tabs and try sending a message.
-
-**What to look for:** the stream no longer behaves like it did. Without Fanout in
-front, nothing is holding the connection open and subscribing it to a channel, so
-the origin has to deal with the long-lived request itself. Watch
-`.dev/logs/origin.log` while you do this, and note that Django is now the thing
-tied up by each connected client — which is exactly what Fanout exists to avoid.
-
-Put the branch back when you're done.
-
----
-
-## 4. Filter messages at the edge
-
-**Goal:** inspect and act on a request body in Compute.
-
-Reject overly long messages before they ever reach the origin. The catch: once
-you read the body, you have to build the forwarded request yourself.
-
-```js
-if (request.method === 'POST' && pathname.endsWith('/messages/')) {
-  const body = await request.text();
-  const text = new URLSearchParams(body).get('text') ?? '';
-
-  if (text.length > 200) {
-    return new Response(JSON.stringify({ error: 'message too long' }), {
-      status: 413,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-
-  return fetch(
-    new Request(request.url, {
-      method: 'POST',
-      headers: request.headers,
-      body,
-    }),
-    { backend: 'origin' },
-  );
+if (events && request.method === 'GET') {
+  const room = events[1];
+  return gripResponse(`room-${room}`);   // no createFanoutHandoff
 }
 ```
 
-**Verify:** send a short message (works), then a very long one:
+Reload the chat. Watch the status dot in the header, and the dev server log.
+
+**What to look for:** the browser now receives the `Grip-Hold` and `Grip-Channel`
+headers *itself* — and does nothing with them, because it is not a GRIP proxy. The
+response has an empty body, so it ends immediately, so `EventSource` reconnects,
+forever. You get a hot loop of requests and no messages.
+
+The lesson: those headers aren't a feature of HTTP. They're instructions, and they
+only mean anything because there's something in the path that speaks GRIP. That
+something is Fanout, and `createFanoutHandoff()` is how you put it there.
+
+Now try the opposite mistake — hand off unconditionally, without the `Grip-Sig`
+check:
+
+```js
+return createFanoutHandoff(request, 'self');
+```
+
+Fanout hands the request to `self`, which hands it to Fanout, which hands it to
+`self`… find out what that looks like in the log, then put both branches back.
+
+---
+
+## 3. Filter messages before they're published
+
+**Goal:** validate and rewrite requests in Compute.
+
+The publish endpoint already truncates and rejects empty messages. Extend it in
+`src/index.js` — pick whichever appeals:
+
+```js
+// Reject a blocklist of words.
+const BLOCKED = ['spam', 'crypto'];
+if (BLOCKED.some((word) => message.text.toLowerCase().includes(word))) {
+  return badRequest('No.');
+}
+
+// Or stamp something on server-side, so clients can't lie about it.
+message.at = new Date().toISOString();
+message.country = event.client.geo?.country_code ?? '??';
+```
+
+If you add a field, render it in `src/page.html` (`addMessage()`).
+
+**Verify:**
 
 ```sh
 curl -si http://127.0.0.1:7676/rooms/default/messages/ \
-  -d 'from=test' --data-urlencode "text=$(python3 -c 'print("x"*300)')" | head -1
+  -d 'from=test' -d 'text=buy crypto now' | head -1
 ```
 
-**Extensions:** a word blocklist; rejecting empty `from`; adding a
-`Fastly-Client-IP`-based rate limit with a
-[KV store](https://www.fastly.com/documentation/guides/concepts/edge-state/data-stores/#kv-stores)
-(deployed only).
+**Worth noticing:** the client can't route around any of this. There is no
+"backend" to reach past — the edge *is* the app. And a rate limit or a blocklist
+here runs in every POP, not in one datacentre.
+
+---
+
+## 4. Subscribe one connection to two channels
+
+**Goal:** learn the shape of GRIP beyond the happy path.
+
+A held connection can be subscribed to several channels: repeat the
+`Grip-Channel` header. Give every connection an `announcements` channel alongside
+its room.
+
+The catch: a plain object can't have two keys of the same name, so
+`gripResponse()` has to build `Headers` and `append`:
+
+```js
+export function gripResponse(channel) {
+  const headers = new Headers({
+    'Content-Type': 'text/event-stream',
+    'Grip-Hold': 'stream',
+    'Grip-Keep-Alive': '\\n; format=cstring; timeout=20',
+  });
+  headers.append('Grip-Channel', channel);
+  headers.append('Grip-Channel', 'announcements');
+  return new Response(null, { headers });
+}
+```
+
+**Verify:** open two tabs in *different* rooms (`/?room=a` and `/?room=b`), then
+publish to `announcements` using the recipe in exercise 5 below. Both tabs should
+show it; a message sent in room `a` should still only appear in room `a`.
+
+**Extensions:** a per-user channel (`user-<nickname>`) for direct messages;
+`Grip-Channel: name; prev-id=<id>` to make the stream detect gaps.
 
 ---
 
 ## 5. Publish to a channel from outside the app
 
-**Goal:** see that publishing is just an HTTP request, decoupled from Django.
+**Goal:** see that publishing is just an HTTP request, decoupled from the app
+that serves the page.
 
-Django publishes to Pushpin's publish endpoint on port 5561. Nothing stops you
-doing the same by hand. Open the chat in a browser, then:
+`publish()` in `src/fanout.js` POSTs to Pushpin's publish endpoint on port 5561.
+Nothing stops you doing the same by hand. Open the chat in a browser, then:
 
 ```sh
 curl -X POST http://127.0.0.1:5561/publish/ \
@@ -172,55 +202,123 @@ curl -X POST http://127.0.0.1:5561/publish/ \
       "channel": "room-default",
       "formats": {
         "http-stream": {
-          "content": "event: message\ndata: {\"from\":\"ghost\",\"text\":\"boo\",\"id\":999999}\n\n"
+          "content": "event: message\ndata: {\"from\":\"ghost\",\"text\":\"boo\"}\n\n"
         }
       }
     }]
   }'
 ```
 
-If the message doesn't render, the SSE framing probably doesn't match what the
-client expects — go back to exercise 0, look at the real bytes on the wire, and
-copy that shape exactly (`django-eventstream` includes an `id:` line and its own
-JSON structure).
+The message appears in every open tab on `room-default`, and your Compute service
+was not involved at all.
+
+If nothing renders, the SSE framing probably doesn't match what the client
+expects — go back to exercise 0, look at the real bytes on the wire, and copy that
+shape exactly. Both `\n\n` at the end matter.
 
 **Why this matters:** in production this same publish goes to
 `https://api.fastly.com/service/<service-id>/publish/`, so *any* system you own
-can push to connected clients — a cron job, a webhook receiver, another service —
-without going through the app that serves the page.
+can push to connected clients — a cron job, a webhook receiver, a CI pipeline,
+another service — with an HTTP request and an API token. Realtime stops being an
+architectural commitment and becomes a thing you can curl.
 
 ---
 
-## 6. Add presence ("N people here")
+## 6. Add history with a KV store
 
-**Goal:** a change spanning both apps.
+**Goal:** the app is currently amnesiac; give it a memory. Also the most
+interesting corner of GRIP.
+
+The trick: a `Grip-Hold: stream` response can *have a body*. Fanout sends that
+body to the client first, then holds the connection open for whatever gets
+published later. So "the last N messages, then live updates" is one response, and
+the client needs no extra request and no extra code.
+
+**1.** Declare a [KV store](https://www.fastly.com/documentation/guides/concepts/edge-state/data-stores/#kv-stores)
+in `fastly.toml`:
+
+```toml
+[local_server.kv_stores]
+history = []
+```
+
+**2.** Append to it when publishing, in `src/index.js`:
+
+```js
+import { KVStore } from 'fastly:kv-store';
+
+const history = new KVStore('history');
+const key = `room-${room}`;
+const previous = await history.get(key);
+const messages = previous ? await previous.json() : [];
+messages.push(message);
+await history.put(key, JSON.stringify(messages.slice(-20)));
+```
+
+**3.** Send it as the body of the GRIP response, in `src/fanout.js`:
+
+```js
+export function gripResponse(channel, backlog = []) {
+  const body = backlog
+    .map((m) => `event: message\ndata: ${JSON.stringify(m)}\n\n`)
+    .join('');
+  return new Response(body, { headers: { /* as before */ } });
+}
+```
+
+**Verify:** send a few messages, then open a fresh tab. It should arrive
+pre-populated, and keep receiving new messages.
+
+**Things that will bite you, and are worth discussing:**
+
+- Read-modify-write on a shared key is a race. Two simultaneous messages and one
+  wins. Fixes: a key per message plus a
+  [list](https://www.fastly.com/documentation/reference/api/services/resources/kv-store-item/)
+  prefix scan, or accept the loss — which is often the right answer for chat.
+- KV writes are eventually consistent between POPs, so a reader in another region
+  may briefly not see the newest message. The realtime stream is what makes this
+  survivable: the live path is Fanout, and KV is only the catch-up path.
+- Locally, Viceroy keeps the store in memory and **loses it when the dev server
+  restarts** — including on every rebuild. Don't debug that for ten minutes.
+
+---
+
+## 7. Add presence ("N people here")
+
+**Goal:** an open-ended one, with a genuinely hard part.
 
 Sketch:
 
-1. In `origin/chat/views.py`, publish an event when someone joins a room.
-2. Give it a distinct event type (e.g. `presence` rather than `message`).
-3. Handle it in `origin/chat/templates/chat/chat.html` with another
-   `es.addEventListener('presence', ...)`.
+1. Publish a `presence` event when someone joins a room. The nickname is already
+   posted with each message; you'll need the client to announce itself.
+2. Give it a distinct event type (`event: presence` instead of `event: message`)
+   and handle it in `page.html` with `stream.addEventListener('presence', ...)`.
 
-The hard part is knowing when someone *leaves* — Fanout holds the connection, so
-the origin isn't told. Options worth discussing: a keepalive ping the client
-sends periodically, or Fanout's
-[subscription callbacks](https://www.fastly.com/documentation/guides/concepts/real-time-messaging/fanout/).
+The hard part is knowing when someone *leaves*. Fanout holds the connection, so
+your code is never told that it dropped — that's the whole trade. Options worth
+arguing about: a periodic heartbeat POST from the client plus a TTL, or Fanout's
+[subscription callbacks](https://www.fastly.com/documentation/guides/concepts/real-time-messaging/fanout/),
+which tell your app when a channel gains or loses subscribers.
 
 ---
 
-## 7. Deploy it for real
+## 8. Deploy it for real
 
 If you have (or make) a Fastly account, see
-[README.md ▸ Deploying to real Fastly](README.md#deploying-to-real-fastly). The
-app code doesn't change at all — only `GRIP_URL` and the backend definition do.
+[README.md ▸ Deploying to real Fastly](README.md#deploying-to-real-fastly).
+
+The app code doesn't change. `src/fanout.js` already picks its publish endpoint
+based on `FASTLY_HOSTNAME`, and `fastly.toml` already declares the backends and
+enables Fanout. The one real difference is the API token, which has to come from
+a secret store rather than being baked into the package.
 
 ---
 
 ## Reference
 
 - [Fanout documentation](https://www.fastly.com/documentation/guides/concepts/real-time-messaging/fanout/)
-- [GRIP protocol](https://pushpin.org/docs/protocols/grip/)
+- [GRIP protocol](https://pushpin.org/docs/protocols/grip/) — the full set of `Grip-*` headers
 - [`fastly:fanout` API](https://js-compute-reference-docs.edgecompute.app/docs/fastly:fanout/createFanoutHandoff)
 - [JavaScript on Compute](https://www.fastly.com/documentation/guides/compute/javascript/)
-- [Upstream demo](https://github.com/fastly/fanout-chat-demo)
+- [Fanout starter kit](https://github.com/fastly/compute-starter-kit-javascript-fanout) — long-polling and WebSockets too
+- [Original chat demo](https://github.com/fastly/fanout-chat-demo) — the same app with a Django origin

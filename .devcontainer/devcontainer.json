@@ -6,31 +6,27 @@
 
   "features": {
     // The Fastly CLI and js-compute toolchain need Node 20+. The CLI itself is
-    // pinned as an npm dependency in edge/package.json, so there's nothing to
+    // pinned as an npm dependency in package.json, so there's nothing to
     // install globally.
     "ghcr.io/devcontainers/features/node:1": {
       "version": "20"
     }
   },
 
-  // Installs project dependencies and pre-builds the Wasm package. This runs
-  // once when the container is created — and is baked into the image if the
-  // repo has Codespaces prebuilds enabled, which makes attendee start-up fast.
+  // Installs dependencies and pre-builds the Wasm package. This runs once when
+  // the container is created — and is baked into the image if the repo has
+  // Codespaces prebuilds enabled, which makes attendee start-up fast.
   "onCreateCommand": "bash .devcontainer/setup.sh",
 
-  // Starts the origin and edge apps. Runs on every attach; the script is
-  // idempotent, so reconnecting just tails the existing logs.
-  "postAttachCommand": "bash scripts/dev.sh",
+  // Starts the dev server. Runs on every attach; if it's already running, the
+  // script says so instead of starting a second one.
+  "postAttachCommand": "bash .devcontainer/start.sh",
 
-  "forwardPorts": [7676, 3000],
+  "forwardPorts": [7676],
   "portsAttributes": {
     "7676": {
       "label": "Chat app (Compute + Fanout)",
       "onAutoForward": "openPreview"
-    },
-    "3000": {
-      "label": "Django origin (direct)",
-      "onAutoForward": "silent"
     },
     // Pushpin's own ports. Traffic reaches these from inside the container
     // only, so there's no reason to forward them.
@@ -46,12 +42,8 @@
 
   "customizations": {
     "vscode": {
-      "extensions": [
-        "ms-python.python",
-        "tamasfe.even-better-toml"
-      ],
+      "extensions": ["tamasfe.even-better-toml"],
       "settings": {
-        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/origin/venv/bin/python",
         "terminal.integrated.defaultProfile.linux": "bash"
       }
     }

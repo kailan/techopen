@@ -1,6 +1,6 @@
 # Fastly Fanout Chat Workshop
 
-A ready-to-hack realtime chat app built on [Fastly Compute](https://www.fastly.com/products/edge-compute)
+A ready-to-hack realtime chat app built entirely on [Fastly Compute](https://www.fastly.com/products/edge-compute)
 and [Fastly Fanout](https://docs.fastly.com/products/fanout), packaged as a
 GitHub Codespace.
 
@@ -16,15 +16,18 @@ your browser.
 
 1. Click **Open in GitHub Codespaces** above (or *Code ▸ Codespaces ▸ Create
    codespace* on the repo).
-2. Wait for setup to finish. It installs Python and Node dependencies, Pushpin,
-   the Fastly CLI and the local dev server, then builds the Wasm package. First
-   run takes a few minutes; if the repo has prebuilds enabled it's near-instant.
-3. Both apps start automatically and you'll see their logs in the terminal.
+2. Wait for setup to finish. It installs Node dependencies, Pushpin, the Fastly
+   CLI and the local dev server, then builds the Wasm package. First run takes a
+   few minutes; if the repo has prebuilds enabled it's near-instant.
+3. The dev server starts automatically and you'll see its log in the terminal.
 4. When port **7676** is forwarded, open it in your browser. Pick a nickname and
    start chatting. Open a second tab to watch messages arrive in realtime.
 
-The chat is served at `/` (nickname prompt), then `/<room-id>?user=<name>`. Any
-room id works — `/default`, `/lobby`, whatever you type.
+Messages aren't stored anywhere — you see what's sent while you're connected.
+(Adding history is [exercise 6](WORKSHOP.md#6-add-history-with-a-kv-store).)
+
+Rooms are just a query parameter: `/?room=lobby`. Any name works; no room needs
+creating.
 
 ### Chat with the person next to you
 
@@ -38,102 +41,100 @@ echo "https://${CODESPACE_NAME}-7676.app.github.dev/"
 
 ## How it works
 
-Two apps run side by side:
+There is no origin server. One Compute app serves the page, holds nothing open,
+and publishes messages:
 
-| Directory | What it is | Port |
-| --- | --- | --- |
-| `edge/` | Fastly Compute app (JavaScript) — the thing at the edge | 7676 |
-| `origin/` | Django backend + frontend, from the upstream demo | 3000 |
-
-Traffic goes **browser → edge → origin**. Port 7676 is the one you want; 3000 is
-exposed only so you can poke at the backend directly.
+| File | What it does |
+| --- | --- |
+| `src/index.js` | Routing: the page, the stream, the publish endpoint |
+| `src/fanout.js` | The two Fanout-specific bits: GRIP responses and publishing |
+| `src/page.html` | The whole frontend, embedded into the Wasm package at build time |
 
 ```
-                       ┌───────────────────────────────────────────┐
-    browser ──────────▶│  edge/   Fastly Compute  ·  :7676         │
-       ▲               │          edge/src/index.js                │
-       │               └──────┬─────────────────────────┬──────────┘
-       │                      │                         │
-       │       normal proxy   │                         │  createFanoutHandoff()
-       │         (HTML, CSS,  │                         │  for GET /rooms/*/events/
-       │          POST msg)   │                         ▼
-       │                      │              ┌─────────────────────┐
-       │   SSE stream, held   │              │       Fanout        │
-       └──────────────────────┼──────────────│  (Pushpin locally)  │
-                              │              └──────────┬──────────┘
-                              │                         │ GRIP: hold + subscribe
-                              ▼                         ▼
-                       ┌───────────────────────────────────────────┐
-                       │  origin/   Django  ·  :3000               │
-                       │  publishes messages ──▶ Pushpin :5561     │
-                       └───────────────────────────────────────────┘
+                    ┌─────────────────────────────────────────────┐
+   browser ────────▶│  Fastly Compute  ·  :7676  ·  src/index.js   │
+      ▲             │                                             │
+      │             │  GET  /                    → page.html      │
+      │             │  GET  /rooms/x/events/     → hand to Fanout ─┼──┐
+      │             │  POST /rooms/x/messages/   → publish ────────┼─┐│
+      │             └─────────────────────────────────────────────┘ ││
+      │                                    ▲                        ││
+      │                                    │ same app, 2nd request  ││
+      │                                    │ (Grip-Sig) → GRIP hdrs ││
+      │   SSE stream, held open            │                        ││
+      └────────────────────────────┬───────┴────────────────────────┘│
+                                   │                                 │
+                            ┌──────┴─────────────────────┐           │
+                            │           Fanout           │◀──────────┘
+                            │     (Pushpin locally)      │  publish to channel
+                            └────────────────────────────┘
 ```
 
 ### The realtime bit, step by step
 
 1. The browser opens an `EventSource` to `GET /rooms/default/events/`.
-2. The edge app spots that path and calls `createFanoutHandoff(request, 'origin')`.
-   That hands the request to Fanout instead of returning a response itself.
-3. Fanout forwards the request to Django. Django (via `django-eventstream` and
-   `django-grip`) replies with [GRIP](https://pushpin.org/docs/protocols/grip/)
+2. The app sees no `Grip-Sig` header, so this request hasn't been through Fanout
+   yet. It calls `createFanoutHandoff(request, 'self')` and returns. It is not
+   holding anything open.
+3. Fanout takes the connection and, to find out what to do with it, forwards the
+   same request to the `self` backend — **which is this app again**. That request
+   arrives with a `Grip-Sig` header.
+4. This time the app replies with [GRIP](https://pushpin.org/docs/protocols/grip/)
    headers meaning *"hold this connection open and subscribe it to channel
-   `room-default`"* — and then the Django worker is **done**. It isn't holding
-   thousands of open sockets; Fanout is.
-4. When someone sends a message, that's an ordinary proxied `POST`. Django saves
-   it and calls `send_event('room-default', ...)`, publishing to `GRIP_URL`.
-5. Fanout pushes the event down every held connection subscribed to that channel.
+   `room-default`"*. Then it's done. Fanout owns the socket from here, however
+   long it lives.
+5. When someone sends a message, that's an ordinary short-lived `POST`. The app
+   publishes a JSON payload to the channel and returns `204`.
+6. Fanout writes that message into every held connection subscribed to the
+   channel.
 
-That's the whole point of Fanout: your backend stays a plain request/response
-app, and the edge absorbs the long-lived connections.
+The point of Fanout is step 4: your code stays a plain request/response app that
+answers in milliseconds, and the edge absorbs every long-lived connection. Ten
+thousand connected clients cost you no held sockets and no idle processes.
+
+The self-referential `self` backend is worth sitting with for a second. The app
+is invoked twice for one client connection: once as the thing being proxied,
+once as the thing that tells Fanout what to do. There's no separate config
+service — the routing decision lives in the same file as everything else.
 
 ### What stands in for Fanout locally
 
 You don't have a Fastly account, so there's no real Fanout. Instead the Fastly
 CLI starts **[Pushpin](https://pushpin.org/)** — the open-source GRIP proxy that
 Fanout is built on — next to the local dev server. That's this bit of
-`edge/fastly.toml`:
+`fastly.toml`:
 
 ```toml
 [local_server.pushpin]
 enable = true
 ```
 
-Pushpin listens on 7677 (proxy) and 5561 (publish). `origin/.env` points
-`GRIP_URL` at `http://127.0.0.1:5561/` so Django publishes there. In production
-`GRIP_URL` would be a `https://api.fastly.com/service/<service-id>?...` URL
-instead — same protocol, same app code.
+Pushpin listens on 7677 (proxy) and 5561 (publish). Publishing goes to
+`http://127.0.0.1:5561/publish/` locally and to
+`https://api.fastly.com/service/<service-id>/publish/` when deployed — same
+request body either way. See `publish()` in `src/fanout.js`.
 
 ## Things to try
 
-See **[WORKSHOP.md](WORKSHOP.md)** for a set of exercises, from "change the
-message format" to "add presence" and "rate-limit at the edge".
-
-The two files worth knowing:
-
-- `edge/src/index.js` — the Compute app. Deliberately short. Saving it triggers
-  an automatic rebuild and reload.
-- `origin/chat/views.py` — the backend endpoints, including where messages get
-  published.
+See **[WORKSHOP.md](WORKSHOP.md)** for a set of exercises, from "add a response
+header" to "add presence" and "keep history in a KV store".
 
 ## Commands
 
-The apps start on their own, but you can drive them manually:
+The dev server starts on its own, but you can drive it yourself:
 
 ```sh
-scripts/dev.sh            # start both (or follow logs if already running)
-scripts/dev.sh restart    # restart both
-scripts/dev.sh stop       # stop both
-scripts/dev.sh status     # what's running, which ports are listening
-scripts/dev.sh logs       # follow logs without starting anything
+npm run dev      # serve on 7676, rebuilding when anything in src/ changes
+npm run build    # just build bin/main.wasm
+npm run deploy   # publish to a real Fastly account (see below)
 ```
 
-Ctrl+C while following logs stops *watching*, not the apps.
+Ctrl+C in the terminal running `npm run dev` stops the server; `npm run dev`
+starts it again.
 
-Logs are also files, if you'd rather open them in the editor:
-`.dev/logs/origin.log` and `.dev/logs/edge.log`.
-
-Editing `edge/src/index.js` rebuilds automatically. Editing Python is picked up
-by Django's autoreloader. If something gets wedged, `scripts/dev.sh restart`.
+Saving any file in `src/` — including `page.html` — triggers a rebuild and
+reload. Watch the terminal for it; a syntax error shows up there and the old
+Wasm keeps serving.
 
 ## Troubleshooting
 
@@ -151,16 +152,22 @@ curl -X POST http://127.0.0.1:7676/rooms/default/messages/ \
 If the event arrives in the `curl` but not in the browser, the app is fine and
 the issue is the forwarded-port proxy — try the browser preview, or make the
 port public (see [above](#chat-with-the-person-next-to-you)). If it doesn't
-arrive in `curl` either, check `scripts/dev.sh status` shows ports 7677 and 5561
-listening — those are Pushpin — and look for errors in `.dev/logs/edge.log`.
+arrive in `curl` either, look for errors in the dev server's terminal output.
 
 **`failed to find 'pushpin' in your $PATH`.**
-The Pushpin install didn't happen. Verify with `command -v pushpin`. Rebuild the
-container (*Codespaces: Rebuild Container* in the command palette).
+The Pushpin install didn't happen, so the dev server won't start. Verify with
+`command -v pushpin`, then rebuild the container (*Codespaces: Rebuild
+Container* in the command palette).
 
-**Port 7676 shows a Fastly error page.**
-Usually the origin is down. Check `.dev/logs/origin.log`, then
-`scripts/dev.sh restart`.
+**`WARN backend 'self' ... is not up right now` at startup.**
+Harmless. The dev server probes backends before it binds its own port, so `self`
+— which is the dev server — can't answer yet. Same for `publisher` before Pushpin
+is up. Neither warning means anything is broken.
+
+**Sending a message returns 502.**
+The publish request failed. The response body says why, and the dev server's
+terminal has the same message. Locally this usually means Pushpin isn't up —
+check that port 5561 is listening.
 
 **Setup half-finished / dependencies missing.**
 Re-run it; it's idempotent:
@@ -180,23 +187,42 @@ container entirely:
 
 ```sh
 brew install pushpin        # macOS; see https://pushpin.org/docs/install/
-bash .devcontainer/setup.sh # needs python3 (3.10 recommended) and node 20+
-scripts/dev.sh
+npm install                 # needs node 20+
+npm run dev
 ```
 
 ## Deploying to real Fastly
 
-Nothing here is Codespaces-specific — it's the upstream demo. Once you have a
-Fastly account:
+Nothing here is Codespaces-specific, and the app code doesn't change. Once you
+have a Fastly account and a [CLI token](https://www.fastly.com/documentation/reference/tools/cli/#configuring):
 
-1. Deploy the backend somewhere publicly reachable and set `GRIP_URL` to
-   `https://api.fastly.com/service/<service-id>?verify-iss=fastly:<service-id>&key=<api-token>`.
-2. `cd edge && npm run deploy`, using the backend's hostname for the `origin`
-   backend.
-3. Enable Fanout on the service: `fastly products --enable=fanout`.
+1. `npm run deploy`. The CLI creates a service and walks you through the setup
+   declared in `fastly.toml`, which enables Fanout and asks for two backends:
+   - **`self`** — this service's own domain, e.g. `my-app.edgecompute.app`, port
+     443, with *Override Host* set to the same value. It points at itself; see
+     [above](#the-realtime-bit-step-by-step).
+   - **`publisher`** — `api.fastly.com`, port 443. Pre-filled for you.
+2. Give the service an API token to publish with. Create a token with **global
+   scope** ([docs](https://www.fastly.com/documentation/guides/account-info/account-management/using-api-tokens/)),
+   then put it in a secret store named `fanout` under the key `api_token`:
 
-Full instructions are in the
-[upstream demo README](https://github.com/fastly/fanout-chat-demo#production).
+   ```sh
+   fastly secret-store create --name fanout
+   fastly secret-store-entry create --store-id <id> --name api_token
+   fastly resource-link create --service-id <service-id> --version latest \
+     --resource-id <id> --autoclone
+   fastly service-version activate --service-id <service-id> --version latest
+   ```
+
+   `src/fanout.js` reads it from there. Without it, `POST /rooms/*/messages/`
+   returns a 502 explaining what's missing — the streaming half still works, and
+   you can drive it by publishing through the API directly
+   ([exercise 5](WORKSHOP.md#5-publish-to-a-channel-from-outside-the-app)).
+
+The one thing to change before putting anything like this in production: verify
+the `Grip-Sig` header's JWT instead of just checking it exists, so clients can't
+forge a request that looks like it came from Fanout. See
+[verifying requests from Fanout](https://www.fastly.com/documentation/guides/concepts/real-time-messaging/fanout/).
 
 ## Notes for the workshop organizer
 
@@ -209,26 +235,26 @@ Before the session:
   dependencies install. With one, they're chatting almost immediately. This is
   the single biggest difference to how the session feels — the container build
   installs Pushpin and Qt dependencies, which is not fast.
-- **Re-run the prebuild** after changing `.devcontainer/` or either dependency
-  manifest, otherwise attendees get the setup at create time instead.
+- **Re-run the prebuild** after changing `.devcontainer/`, `package.json` or
+  `package-lock.json`, otherwise attendees get the setup at create time instead.
 - **Check attendee Codespaces quota.** Free personal accounts include monthly
   core-hours; a 2-core machine is enough here and uses the least quota.
 - **Try the badge yourself** from an account without push access, to be sure
   permissions are right.
 
 During the session, if someone's environment is broken, the fastest fixes are
-`scripts/dev.sh restart`, then *Codespaces: Rebuild Container*.
+Ctrl+C then `npm run dev`, and then *Codespaces: Rebuild Container*.
 
 ## Credits
 
-Based on [fastly/fanout-chat-demo](https://github.com/fastly/fanout-chat-demo)
-(MIT). Changes made for the workshop:
+The chat app is a rewrite of [fastly/fanout-chat-demo](https://github.com/fastly/fanout-chat-demo)
+(MIT) with the Django origin removed — everything is served from Compute
+instead, so there's one language and one process to think about. The
+self-referential-backend pattern follows Fastly's
+[Fanout starter kit](https://github.com/fastly/compute-starter-kit-javascript-fanout)
+(MIT).
 
-- A devcontainer that installs Pushpin, so local Fanout works with no accounts.
-- `scripts/dev.sh` to run both apps together.
-- `edge/src/index.js` trimmed to just the Fanout logic (the upstream version also
-  serves a demo manifest and screenshot for Fastly's demo gallery).
-- `@fastly/cli` bumped to v16 — `[local_server.pushpin]` needs ≥ 13.1.0.
-- `ALLOWED_HOSTS` extended to cover Codespaces forwarded-port domains.
+Added for the workshop: a devcontainer that installs Pushpin, so Fanout works
+locally with no Fastly account.
 
 Licensed under [MIT](LICENSE.md).

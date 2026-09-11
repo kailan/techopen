@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fanout chat</title>
+    <style>
+      :root {
+        --bg: #10121a;
+        --panel: #191d28;
+        --line: #2b3140;
+        --text: #e6e8ef;
+        --dim: #8b93a7;
+        --accent: #e01f3d;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          Roboto, sans-serif;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      header .room {
+        color: var(--dim);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+      }
+
+      #status {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--dim);
+        font-size: 13px;
+      }
+
+      #status::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--dim);
+      }
+
+      #status.live::before {
+        background: #35c46a;
+      }
+
+      #status.down::before {
+        background: var(--accent);
+      }
+
+      main {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px;
+      }
+
+      .msg {
+        margin-bottom: 10px;
+        overflow-wrap: anywhere;
+      }
+
+      .msg .from {
+        font-weight: 600;
+        margin-right: 6px;
+      }
+
+      .note {
+        margin-bottom: 10px;
+        color: var(--dim);
+        font-size: 13px;
+        font-style: italic;
+      }
+
+      form {
+        display: flex;
+        gap: 8px;
+        padding: 12px 16px;
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      input,
+      button {
+        font: inherit;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        padding: 9px 12px;
+      }
+
+      input {
+        flex: 1;
+        min-width: 0;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      input:focus {
+        outline: 2px solid var(--accent);
+        outline-offset: -1px;
+      }
+
+      button {
+        border-color: transparent;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+
+      /* The nickname screen, shown until a name is chosen. */
+      #join {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        background: var(--bg);
+        padding: 24px;
+      }
+
+      #join[hidden] {
+        display: none;
+      }
+
+      #join form {
+        flex-direction: column;
+        width: 100%;
+        max-width: 340px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 24px;
+      }
+
+      #join h2 {
+        margin: 0 0 4px;
+        font-size: 17px;
+      }
+
+      #join p {
+        margin: 0 0 8px;
+        color: var(--dim);
+        font-size: 13px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>Fanout chat</h1>
+      <span class="room">#<span id="room-name"></span></span>
+      <span id="status">connecting…</span>
+    </header>
+
+    <main id="log">
+      <p class="note">
+        Messages are not stored anywhere — you'll see what's sent from now on.
+      </p>
+    </main>
+
+    <form id="send" autocomplete="off">
+      <input
+        id="text"
+        placeholder="Message"
+        maxlength="500"
+        required
+        aria-label="Message"
+      />
+      <button type="submit">Send</button>
+    </form>
+
+    <div id="join">
+      <form id="join-form" autocomplete="off">
+        <h2>Pick a nickname</h2>
+        <p>Open this page in another tab (or send it to someone) to chat.</p>
+        <input
+          id="nickname"
+          placeholder="Nickname"
+          maxlength="40"
+          required
+          aria-label="Nickname"
+        />
+        <button type="submit">Join</button>
+      </form>
+    </div>
+
+    <script>
+      const params = new URLSearchParams(location.search);
+      const room = params.get("room") || "default";
+      document.getElementById("room-name").textContent = room;
+
+      const log = document.getElementById("log");
+      const status = document.getElementById("status");
+
+      function show(node) {
+        // Only autoscroll if the reader is already at the bottom.
+        const atBottom =
+          log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+        log.append(node);
+        if (atBottom) log.scrollTop = log.scrollHeight;
+      }
+
+      function note(text) {
+        const p = document.createElement("p");
+        p.className = "note";
+        p.textContent = text;
+        show(p);
+      }
+
+      function addMessage({ from, text }) {
+        const p = document.createElement("p");
+        p.className = "msg";
+        const who = document.createElement("span");
+        who.className = "from";
+        who.textContent = `${from}:`;
+        p.append(who, document.createTextNode(text));
+        show(p);
+      }
+
+      function setStatus(text, state) {
+        status.textContent = text;
+        status.className = state || "";
+      }
+
+      // --- the realtime bit ---------------------------------------------------
+      //
+      // A plain EventSource. Everything interesting happens on the way: the edge
+      // app hands this request to Fanout, which holds it open and subscribes it
+      // to the channel for this room. See src/index.js.
+
+      const stream = new EventSource(`/rooms/${encodeURIComponent(room)}/events/`);
+
+      stream.onopen = () => setStatus("live", "live");
+
+      stream.onerror = () =>
+        setStatus(
+          stream.readyState === EventSource.CONNECTING
+            ? "reconnecting…"
+            : "disconnected",
+          "down",
+        );
+
+      stream.onmessage = (event) => {
+        try {
+          addMessage(JSON.parse(event.data));
+        } catch {
+          note(`Unparseable message: ${event.data}`);
+        }
+      };
+
+      // --- sending ------------------------------------------------------------
+      //
+      // An ordinary POST, form-encoded. Nothing realtime about it — the message
+      // comes back to us via the stream above, like everyone else's.
+
+      let nickname = "";
+      const sendForm = document.getElementById("send");
+      const textInput = document.getElementById("text");
+
+      sendForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const text = textInput.value.trim();
+        if (!text) return;
+
+        textInput.value = "";
+        try {
+          const response = await fetch(
+            `/rooms/${encodeURIComponent(room)}/messages/`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: new URLSearchParams({ from: nickname, text }),
+            },
+          );
+          if (!response.ok) {
+            note(`Could not send: ${(await response.text()).trim()}`);
+          }
+        } catch (error) {
+          note(`Could not send: ${error.message}`);
+        }
+      });
+
+      // --- nickname -----------------------------------------------------------
+
+      const join = document.getElementById("join");
+      const nicknameInput = document.getElementById("nickname");
+
+      function start(name) {
+        nickname = name;
+        localStorage.setItem("nickname", name);
+        join.hidden = true;
+        textInput.focus();
+      }
+
+      document.getElementById("join-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const name = nicknameInput.value.trim();
+        if (name) start(name);
+      });
+
+      const remembered = params.get("user") || localStorage.getItem("nickname");
+      if (remembered) {
+        start(remembered);
+      } else {
+        nicknameInput.focus();
+      }
+    </script>
+  </body>
+</html>

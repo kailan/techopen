@@ -1,10 +1,7 @@
-# Ubuntu 22.04 "jammy" is deliberate, on two counts:
-#
-#   1. Pushpin publishes apt packages for Ubuntu (and old Debian), but not for
-#      Debian bookworm — which is what most devcontainer images are based on.
-#   2. Jammy's system Python is 3.10, which is what the Django 3.2 backend
-#      inherited from the upstream demo wants. Newer images ship Python 3.12,
-#      where Django 3.2 does not run.
+# Ubuntu 22.04 "jammy" is deliberate: Pushpin publishes apt packages for Ubuntu
+# (and old Debian), but not for Debian bookworm — which is what most devcontainer
+# base images are built on. Jammy is also the release where the install below,
+# including its version fallback, has actually been verified to work.
 FROM mcr.microsoft.com/devcontainers/base:jammy
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -24,19 +21,11 @@ RUN arch="$(dpkg --print-architecture)"; \
       echo "  * force amd64 emulation locally, e.g. by adding" >&2; \
       echo "      \"runArgs\": [\"--platform=linux/amd64\"]" >&2; \
       echo "    to .devcontainer/devcontainer.json (slow), or" >&2; \
-      echo "  * install Pushpin yourself and run the apps outside a container" >&2; \
+      echo "  * install Pushpin yourself and run the app outside a container" >&2; \
       echo "    (see README.md -> Running without Codespaces)." >&2; \
       echo "================================================================" >&2; \
       exit 1; \
     fi
-
-# System Python for the Django origin app.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        python3 \
-        python3-venv \
-        python3-pip \
-    && rm -rf /var/lib/apt/lists/*
 
 # Pushpin: the open-source GRIP proxy that Fastly Fanout is built on. The
 # Fastly CLI shells out to this binary so that createFanoutHandoff() works on
