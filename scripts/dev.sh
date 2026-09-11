@@ -62,35 +62,30 @@ start_app() {
   shift 2
   local log="$LOG_DIR/$name.log"
 
-  # `setsid` puts the command in a fresh process group so that it survives this
-  # script exiting (e.g. when the attendee closes the terminal), and so that we
-  # can signal it and all of its children together.
-  ( cd "$workdir" && exec setsid "$@" ) >"$log" 2>&1 &
-  local pid=$!
+  local pgid_path
+  pgid_path="$(pgid_file "$name")"
+  rm -f "$pgid_path"
 
-  # Read back the real process group id, and wait until it differs from our own.
-  # Until setsid(2) has actually been called the child is still in this script's
-  # process group, and recording that would mean a later `kill -- -$pgid` took
-  # down this script and its siblings instead of the app.
-  local self_pgid pgid=""
-  self_pgid="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+  # `setsid` puts the command in a fresh process group, so that it survives this
+  # script exiting (e.g. when the attendee closes the terminal) and so that we
+  # can signal it together with all of its children.
+  #
+  # The wrapper shell records the group id itself rather than us guessing it from
+  # the outside: after setsid(2) it is the group leader, so its $$ *is* the pgid.
+  # Observing it from here would be a race — until setsid has taken effect the
+  # child still shares this script's process group, and storing that would mean a
+  # later `kill -- -$pgid` killed this script instead of the app.
+  (
+    cd "$workdir" || exit 1
+    exec setsid env PGID_FILE="$pgid_path" \
+      bash -c 'echo $$ > "$PGID_FILE"; exec "$@"' _ "$@"
+  ) >"$log" 2>&1 &
+
   for _ in $(seq 1 50); do
-    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
-    if [ -n "$pgid" ] && [ "$pgid" != "$self_pgid" ]; then
-      break
-    fi
-    pgid=""
+    [ -s "$pgid_path" ] && return 0
     sleep 0.1
   done
-
-  if [ -z "$pgid" ]; then
-    # Either it exited immediately, or it never got its own group. Fall back to
-    # the bare pid: signalling a non-existent group is harmless, and the logs
-    # will show what went wrong.
-    warn "Could not confirm a process group for $name — see $log"
-    pgid="$pid"
-  fi
-  echo "$pgid" > "$(pgid_file "$name")"
+  warn "Could not determine the process group for $name — see $log"
 }
 
 stop_app() {
@@ -155,7 +150,7 @@ do_start() {
   else
     info "Starting origin (Django) on port $ORIGIN_PORT"
     start_app origin "$REPO_ROOT/origin" ./venv/bin/python manage.py runserver "$ORIGIN_PORT"
-    wait_for_port "$ORIGIN_PORT" "origin"
+    wait_for_port "$ORIGIN_PORT" "origin" 100
   fi
 
   if running edge; then
@@ -168,7 +163,11 @@ do_start() {
     # is pinned by edge/package.json. It rebuilds the Wasm package when files
     # in edge/src change.
     start_app edge "$REPO_ROOT/edge" npm run dev
-    wait_for_port "$EDGE_PORT" "edge"
+    # The CLI rebuilds the Wasm package before serving and then boots Pushpin,
+    # which can take a while on a small (2-core) Codespace. Be patient here: a
+    # premature warning sends people troubleshooting a non-problem.
+    echo "    (building the Wasm package and starting Pushpin — first run is slowest)"
+    wait_for_port "$EDGE_PORT" "edge" 600
   fi
 
   echo

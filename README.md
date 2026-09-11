@@ -186,6 +186,27 @@ Fastly account:
 Full instructions are in the
 [upstream demo README](https://github.com/fastly/fanout-chat-demo#production).
 
+## Notes for the workshop organizer
+
+Before the session:
+
+- **Make the repo public** (or make sure every attendee has access) — the
+  Codespaces badge needs it.
+- **Turn on prebuilds**: *Settings ▸ Codespaces ▸ Set up prebuild* for `main`.
+  Without one, each attendee waits several minutes while the image builds and
+  dependencies install. With one, they're chatting almost immediately. This is
+  the single biggest difference to how the session feels — the container build
+  installs Pushpin and Qt dependencies, which is not fast.
+- **Re-run the prebuild** after changing `.devcontainer/` or either dependency
+  manifest, otherwise attendees get the setup at create time instead.
+- **Check attendee Codespaces quota.** Free personal accounts include monthly
+  core-hours; a 2-core machine is enough here and uses the least quota.
+- **Try the badge yourself** from an account without push access, to be sure
+  permissions are right.
+
+During the session, if someone's environment is broken, the fastest fixes are
+`scripts/dev.sh restart`, then *Codespaces: Rebuild Container*.
+
 ## Credits
 
 Based on [fastly/fanout-chat-demo](https://github.com/fastly/fanout-chat-demo)
